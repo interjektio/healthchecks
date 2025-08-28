@@ -1,28 +1,103 @@
 services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./certs:/certs:ro
+    environment:
+      # Providers
+      - TRAEFIK_PROVIDERS_DOCKER=true
+      - TRAEFIK_PROVIDERS_DOCKER_NETWORK=interjektio-healthchecks_edge
+      # Entrypoints
+      - TRAEFIK_ENTRYPOINTS_WEB_ADDRESS=:80
+      - TRAEFIK_ENTRYPOINTS_WEBSECURE_ADDRESS=:443
+      # Redirect HTTP -> HTTPS
+      - TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_TO=websecure
+      - TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_SCHEME=https
+      - TRAEFIK_ENTRYPOINTS_WEB_HTTP_REDIRECTIONS_ENTRYPOINT_PERMANENT=true
+
+      # Use local self-signed cert as default
+      - TRAEFIK_CERTIFICATESRESOLVERS_MYRESOLVER=true
+      - TRAEFIK_CERTIFICATESRESOLVERS_MYRESOLVER_ACME_HTTPCHALLENGE=true
+      - TRAEFIK_CERTIFICATESRESOLVERS_MYRESOLVER_ACME_HTTPCHALLENGE_ENTRYPOINT=web
+      - TRAEFIK_CERTIFICATESRESOLVERS_MYRESOLVER_ACME_EMAIL=${ACME_EMAIL:?Variable ACME_EMAIL not set or empty}
+      - TRAEFIK_CERTIFICATESRESOLVERS_MYRESOLVER_ACME_STORAGE=/letsencrypt/acme.json
+
+      # Logs
+      - TRAEFIK_LOG_FILEPATH=/dev/stdout
+      - TRAEFIK_LOG_LEVEL=INFO
+      - TRAEFIK_ACCESSLOG=true
+    labels:
+      # Use let's encrypt as the default certificate resolver
+      - "traefik.tls.stores.default.defaultgeneratedcert.resolver=myresolver"
+      - "traefik.tls.stores.default.defaultgeneratedcert.domain.main=${HOSTNAME:?Variable HOSTNAME not set or empty}"
+    networks:
+      - edge
+
   db:
     image: postgres:16
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${DB_NAME:?Variable DB_NAME not set or empty}
+      - POSTGRES_USER=${DB_USER:?Variable DB_USER not set or empty}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?Variable DB_PASSWORD not set or empty}
     volumes:
       - db-data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_DB=$DB_NAME
-      - POSTGRES_PASSWORD=$DB_PASSWORD
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks:
+      - internal
+
   web:
+    # Use your build or the official image; pick one:
     build:
-        context: .
-        dockerfile: docker/Dockerfile
-    # To use a pre-built image, remove the above "build" section
-    # and uncomment the following line:
+      context: .
+      dockerfile: docker/Dockerfile
     # image: healthchecks/healthchecks:latest
+
+    restart: unless-stopped
     env_file:
-        - .env
-    ports:
-        - "8000:8000"
-        # To enable SMTP on port 2525, set SMTPD_PORT=2525 in .env
-        # and uncomment the following line:
-        # - "2525:2525"
+      - .env
     depends_on:
-        - db
-    command: bash -c 'while !</dev/tcp/db/5432; do sleep 1; done; uwsgi /opt/healthchecks/docker/uwsgi.ini'
+      db:
+        condition: service_healthy
+      traefik:
+        condition: service_started
+
+    # Ensure the app listens on 0.0.0.0:8000 inside the container
+    command: >
+      bash -lc 'uwsgi --ini /opt/healthchecks/docker/uwsgi.ini'
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.hc.rule=Host(`${HOSTNAME:?Variable HOSTNAME not set}`)
+      - traefik.http.routers.hc.entrypoints=websecure
+      - traefik.http.routers.hc.tls=true
+      - traefik.http.routers.hc.tls.certresolver=myresolver
+
+      # Tell Traefik which internal port the app uses:
+      - traefik.http.services.hc.loadbalancer.server.port=8000
+
+      # Optional basic auth
+      - traefik.http.middlewares.hc-auth.basicauth.users=${BASIC_AUTH_USERS:?Set BASIC_AUTH_USERS}
+      - traefik.http.routers.hc.middlewares=hc-auth@docker
+
+    networks:
+      - edge
+      - internal
 
 volumes:
-    db-data:
+  db-data:
+
+networks:
+  edge:
+    driver: bridge
+  internal:
+    driver: bridge
