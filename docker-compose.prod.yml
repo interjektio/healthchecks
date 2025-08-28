@@ -86,8 +86,8 @@ services:
       - traefik.http.services.hc.loadbalancer.server.port=8000
 
       # Optional basic auth
-      - traefik.http.middlewares.hc-auth.basicauth.users=${BASIC_AUTH_USERS:?Set BASIC_AUTH_USERS}
-      - traefik.http.routers.hc.middlewares=hc-auth@docker
+      #- traefik.http.middlewares.hc-auth.basicauth.users=${BASIC_AUTH_USERS:?Set BASIC_AUTH_USERS}
+      #- traefik.http.routers.hc.middlewares=hc-auth@docker
 
     networks:
       - edge
